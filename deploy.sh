@@ -1,4 +1,4 @@
-et -eux
+set -eux
 
 date -R
 echo "Started deploying."
