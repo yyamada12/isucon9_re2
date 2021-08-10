@@ -26,4 +26,4 @@ alias pps='go tool pprof -png -output ~/pprof/pprof.png http://localhost:6060/de
 
 # app
 alias deploy='~/deploy.sh'
-alias applog='sudo journalctl -f -u'
+alias applog='sudo journalctl -f -u isucari.golang'
