@@ -164,6 +164,13 @@ type Shipping struct {
 	UpdatedAt             time.Time `json:"-" db:"updated_at"`
 }
 
+type TransactionEvidenceWithShippingReserveID struct {
+	ID        int64  `json:"id" db:"id"`
+	Status    string `json:"status" db:"status"`
+	ItemID    int64  `json:"item_id" db:"item_id"`
+	ReserveID string `json:"reserve_id" db:"reserve_id"`
+}
+
 type Category struct {
 	ID                 int    `json:"id" db:"id"`
 	ParentID           int    `json:"parent_id" db:"parent_id"`
@@ -471,6 +478,24 @@ func getConfigByName(name string) (string, error) {
 		return "", err
 	}
 	return config.Val, err
+}
+
+func getTransactionEvidences(q sqlx.Queryer, itemIDs []int64) (res map[int64]TransactionEvidenceWithShippingReserveID, err error) {
+	qs, params, err := sqlx.In("SELECT te.id AS id, te.status as status, te.item_id as item_id, s.reserve_id FROM `transaction_evidences` AS te LEFT JOIN `shippings` AS s ON te.id = s.transaction_evidence_id WHERE te.`item_id` IN (?)", itemIDs)
+	if err != nil {
+		return res, err
+	}
+
+	records := []TransactionEvidenceWithShippingReserveID{}
+	if err := sqlx.Select(q, &records, qs, params...); err != nil {
+		return res, err
+	}
+
+	res = make(map[int64]TransactionEvidenceWithShippingReserveID)
+	for _, record := range records {
+		res[record.ItemID] = record
+	}
+	return res, nil
 }
 
 func getPaymentServiceURL() string {
@@ -958,13 +983,20 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 
 	userIDs := []int64{}
 	categoryIDs := []int{}
+	itemIDs := []int64{}
 	for _, item := range items {
 		userIDs = append(userIDs, item.BuyerID)
 		userIDs = append(userIDs, item.SellerID)
 		categoryIDs = append(categoryIDs, item.CategoryID)
+		itemIDs = append(itemIDs, item.ID)
 	}
 
 	userSimpleMap, err := getUserSimpleByIDs(tx, userIDs)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	transactionEvidenceMap, err := getTransactionEvidences(tx, itemIDs)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -1015,32 +1047,17 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			itemDetail.Buyer = &buyer
 		}
 
-		transactionEvidence := TransactionEvidence{}
-		err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
-		if err != nil && err != sql.ErrNoRows {
-			// It's able to ignore ErrNoRows
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			tx.Rollback()
-			return
-		}
+		transactionEvidence, ok := transactionEvidenceMap[item.ID]
+		if ok && transactionEvidence.ID > 0 {
 
-		if transactionEvidence.ID > 0 {
-			shipping := Shipping{}
-			err = tx.Get(&shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
-			if err == sql.ErrNoRows {
+			if transactionEvidence.ReserveID == "" {
 				outputErrorMsg(w, http.StatusNotFound, "shipping not found")
 				tx.Rollback()
 				return
 			}
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(w, http.StatusInternalServerError, "db error")
-				tx.Rollback()
-				return
-			}
+
 			ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
-				ReserveID: shipping.ReserveID,
+				ReserveID: transactionEvidence.ReserveID,
 			})
 			if err != nil {
 				log.Print(err)
