@@ -60,9 +60,10 @@ const (
 )
 
 var (
-	templates *template.Template
-	dbx       *sqlx.DB
-	store     sessions.Store
+	templates   *template.Template
+	dbx         *sqlx.DB
+	store       sessions.Store
+	categoryMap map[int]Category
 )
 
 type Config struct {
@@ -319,6 +320,9 @@ func main() {
 	}
 	defer dbx.Close()
 
+	// load categories
+	categoryMap = getCategories()
+
 	mux := goji.NewMux()
 
 	// API
@@ -437,6 +441,25 @@ func getCategoryByID(q sqlx.Queryer, categoryID int) (category Category, err err
 	return category, err
 }
 
+func getCategories() map[int]Category {
+	categories := []Category{}
+	if err := dbx.Select(&categories, "SELECT * FROM `categories` ORDER BY `id`"); err != nil {
+		log.Fatal("select category failed", err)
+	}
+	categoryMap := make(map[int]Category)
+	for _, category := range categories {
+		if category.ParentID != 0 {
+			parentCategory, ok := categoryMap[category.ParentID]
+			if !ok {
+				log.Fatal("load category failed")
+			}
+			category.ParentCategoryName = parentCategory.CategoryName
+		}
+		categoryMap[category.ID] = category
+	}
+	return categoryMap
+}
+
 func getConfigByName(name string) (string, error) {
 	config := Config{}
 	err := dbx.Get(&config, "SELECT * FROM `configs` WHERE `name` = ?", name)
@@ -508,6 +531,9 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
 		return
 	}
+
+	// load categories
+	categoryMap = getCategories()
 
 	res := resInitialize{
 		// キャンペーン実施時には還元率の設定を返す。詳しくはマニュアルを参照のこと。
@@ -931,9 +957,11 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userIDs := []int64{}
+	categoryIDs := []int{}
 	for _, item := range items {
 		userIDs = append(userIDs, item.BuyerID)
 		userIDs = append(userIDs, item.SellerID)
+		categoryIDs = append(categoryIDs, item.CategoryID)
 	}
 
 	userSimpleMap, err := getUserSimpleByIDs(tx, userIDs)
@@ -950,8 +978,8 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		category, err := getCategoryByID(tx, item.CategoryID)
-		if err != nil {
+		category, ok := categoryMap[item.CategoryID]
+		if !ok {
 			outputErrorMsg(w, http.StatusNotFound, "category not found")
 			tx.Rollback()
 			return
