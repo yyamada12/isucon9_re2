@@ -171,6 +171,7 @@ type TransactionEvidenceWithShippingReserveID struct {
 	Status    string `json:"status" db:"status"`
 	ItemID    int64  `json:"item_id" db:"item_id"`
 	ReserveID string `json:"reserve_id" db:"reserve_id"`
+	SStatus   string `json:"status" db:"s_status"`
 }
 
 type Category struct {
@@ -488,7 +489,7 @@ func getConfigByName(name string) (string, error) {
 }
 
 func getTransactionEvidences(q sqlx.Queryer, itemIDs []int64) (res map[int64]TransactionEvidenceWithShippingReserveID, err error) {
-	qs, params, err := sqlx.In("SELECT te.id AS id, te.status as status, te.item_id as item_id, s.reserve_id FROM `transaction_evidences` AS te LEFT JOIN `shippings` AS s ON te.id = s.transaction_evidence_id WHERE te.`item_id` IN (?)", itemIDs)
+	qs, params, err := sqlx.In("SELECT te.id AS id, te.status as status, te.item_id as item_id, s.reserve_id, s.status as s_status FROM `transaction_evidences` AS te LEFT JOIN `shippings` AS s ON te.id = s.transaction_evidence_id WHERE te.`item_id` IN (?)", itemIDs)
 	if err != nil {
 		return res, err
 	}
@@ -1008,19 +1009,19 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		log.Fatal(err)
 	}
 
+	tx.Commit()
+
 	itemDetails := []ItemDetail{}
 	for _, item := range items {
 		seller, ok := userSimpleMap[item.SellerID]
 		if !ok {
 			outputErrorMsg(w, http.StatusNotFound, "seller not found")
-			tx.Rollback()
 			return
 		}
 
 		category, ok := categoryMap[item.CategoryID]
 		if !ok {
 			outputErrorMsg(w, http.StatusNotFound, "category not found")
-			tx.Rollback()
 			return
 		}
 
@@ -1047,7 +1048,6 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			buyer, ok := userSimpleMap[item.BuyerID]
 			if !ok {
 				outputErrorMsg(w, http.StatusNotFound, "buyer not found")
-				tx.Rollback()
 				return
 			}
 			itemDetail.BuyerID = item.BuyerID
@@ -1059,28 +1059,15 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 
 			if transactionEvidence.ReserveID == "" {
 				outputErrorMsg(w, http.StatusNotFound, "shipping not found")
-				tx.Rollback()
 				return
 			}
-
-			ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
-				ReserveID: transactionEvidence.ReserveID,
-			})
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
-				tx.Rollback()
-				return
-			}
-
 			itemDetail.TransactionEvidenceID = transactionEvidence.ID
 			itemDetail.TransactionEvidenceStatus = transactionEvidence.Status
-			itemDetail.ShippingStatus = ssr.Status
+			itemDetail.ShippingStatus = transactionEvidence.SStatus
 		}
 
 		itemDetails = append(itemDetails, itemDetail)
 	}
-	tx.Commit()
 
 	hasNext := false
 	if len(itemDetails) > TransactionsPerPage {
