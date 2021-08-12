@@ -634,10 +634,19 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	userIDs := []int64{}
+	for _, item := range items {
+		userIDs = append(userIDs, item.SellerID)
+	}
+	userSimpleMap, err := getUserSimpleByIDs(dbx, userIDs)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	itemSimples := []ItemSimple{}
 	for _, item := range items {
-		seller, err := getUserSimpleByID(dbx, item.SellerID)
-		if err != nil {
+		seller, ok := userSimpleMap[item.SellerID]
+		if !ok {
 			outputErrorMsg(w, http.StatusNotFound, "seller not found")
 			return
 		}
@@ -1461,12 +1470,43 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scr, err := APIShipmentCreate(getShipmentServiceURL(), &APIShipmentCreateReq{
-		ToAddress:   buyer.Address,
-		ToName:      buyer.AccountName,
-		FromAddress: seller.Address,
-		FromName:    seller.AccountName,
-	})
+	type APIShipmentResult struct {
+		scr *APIShipmentCreateRes
+		err error
+	}
+
+	chAPIShipment := make(chan APIShipmentResult)
+
+	go func() {
+		scr, err := APIShipmentCreate(getShipmentServiceURL(), &APIShipmentCreateReq{
+			ToAddress:   buyer.Address,
+			ToName:      buyer.AccountName,
+			FromAddress: seller.Address,
+			FromName:    seller.AccountName,
+		})
+		chAPIShipment <- APIShipmentResult{scr, err}
+	}()
+
+	type APIPaymentResult struct {
+		pstr *APIPaymentServiceTokenRes
+		err  error
+	}
+
+	chAPIPayment := make(chan APIPaymentResult)
+
+	go func() {
+		pstr, err := APIPaymentToken(getPaymentServiceURL(), &APIPaymentServiceTokenReq{
+			ShopID: PaymentServiceIsucariShopID,
+			Token:  rb.Token,
+			APIKey: PaymentServiceIsucariAPIKey,
+			Price:  targetItem.Price,
+		})
+		chAPIPayment <- APIPaymentResult{pstr, err}
+	}()
+
+	resShipment := <-chAPIShipment
+	scr := resShipment.scr
+	err = resShipment.err
 	if err != nil {
 		log.Print(err)
 		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
@@ -1475,12 +1515,10 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pstr, err := APIPaymentToken(getPaymentServiceURL(), &APIPaymentServiceTokenReq{
-		ShopID: PaymentServiceIsucariShopID,
-		Token:  rb.Token,
-		APIKey: PaymentServiceIsucariAPIKey,
-		Price:  targetItem.Price,
-	})
+	resPayment := <-chAPIPayment
+	pstr := resPayment.pstr
+	err = resPayment.err
+
 	if err != nil {
 		log.Print(err)
 
